@@ -773,13 +773,19 @@ function renderVideos(videos) {
   grid.innerHTML = videos.map(v => {
     const tag = allTags.find(t => t.name === v.tag);
     const tagColor = tag ? tag.color : '#6366f1';
+    const thumbHtml = v.thumbnail_key
+      ? \`<img src="/api/videos/\${v.id}/thumbnail" alt="thumbnail"
+             style="width:100%; height:100%; object-fit:cover; position:absolute; inset:0;"
+             onerror="this.style.display='none'">\`
+      : '';
     return \`
       <div class="video-card" onclick="openPlayer(\${v.id})">
         <div class="video-thumb">
+          \${thumbHtml}
+          <i class="fas fa-video video-thumb-icon" style="position:absolute; \${v.thumbnail_key ? 'display:none;' : ''}"></i>
           <div class="play-overlay">
             <i class="fas fa-play-circle"></i>
           </div>
-          <i class="fas fa-video video-thumb-icon" style="position:absolute;"></i>
           <div class="video-badge">\${formatSize(v.file_size)}</div>
         </div>
         <div class="video-info">
@@ -903,11 +909,17 @@ async function submitUpload() {
     document.getElementById('progressLabel').textContent = \`(\${i+1}/\${pendingFiles.length}) \${file.name}\`;
     
     try {
+      // サムネイル生成（ブラウザ側Canvas）
+      document.getElementById('progressLabel').textContent = \`(\${i+1}/\${pendingFiles.length}) サムネイル生成中...\`;
+      const thumbnail = await generateThumbnail(file);
+
       const formData = new FormData();
       formData.append('file', file);
       formData.append('tag', tag);
       formData.append('memo', memo);
+      if (thumbnail) formData.append('thumbnail', thumbnail);
       
+      document.getElementById('progressLabel').textContent = \`(\${i+1}/\${pendingFiles.length}) \${file.name}\`;
       const res = await fetch('/api/videos/upload', {
         method: 'POST',
         body: formData
@@ -933,6 +945,51 @@ async function submitUpload() {
     loadVideos();
     if (success > 0) showToast(\`\${success}件アップロード完了！\`, 'success');
   }, 500);
+}
+
+// =====================
+// サムネイル生成（Canvas）
+// =====================
+function generateThumbnail(file) {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const video = document.createElement('video');
+    video.preload = 'metadata';
+    video.muted = true;
+    video.playsInline = true;
+    video.crossOrigin = 'anonymous';
+
+    const cleanup = () => { URL.revokeObjectURL(url); };
+
+    video.onloadeddata = () => {
+      // 動画の長さが取れればその5%地点、無ければ1秒
+      const seekTime = video.duration > 0 ? Math.min(video.duration * 0.05, 3) : 1;
+      video.currentTime = seekTime;
+    };
+
+    video.onseeked = () => {
+      try {
+        const canvas = document.createElement('canvas');
+        const W = 640;
+        const H = Math.round(W * (video.videoHeight / video.videoWidth)) || 360;
+        canvas.width = W;
+        canvas.height = H;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(video, 0, 0, W, H);
+        const jpeg = canvas.toDataURL('image/jpeg', 0.75);
+        cleanup();
+        resolve(jpeg);
+      } catch (e) {
+        cleanup();
+        resolve(null);
+      }
+    };
+
+    video.onerror = () => { cleanup(); resolve(null); };
+    // タイムアウト保険（5秒）
+    setTimeout(() => { cleanup(); resolve(null); }, 5000);
+    video.src = url;
+  });
 }
 
 // =====================
@@ -1327,14 +1384,55 @@ app.post('/api/videos/upload', async (c) => {
       httpMetadata: { contentType: file.type || 'video/mp4' }
     })
 
+    // サムネイル（Base64 JPEG）があればR2に保存
+    const thumbnailBase64 = (formData.get('thumbnail') as string) || ''
+    let thumbnailKey: string | null = null
+    if (thumbnailBase64) {
+      try {
+        const base64Data = thumbnailBase64.replace(/^data:image\/jpeg;base64,/, '')
+        const binaryStr = atob(base64Data)
+        const bytes = new Uint8Array(binaryStr.length)
+        for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i)
+        thumbnailKey = `thumbnails/${Date.now()}-${Math.random().toString(36).substring(2, 8)}.jpg`
+        await c.env.VIDEO_BUCKET.put(thumbnailKey, bytes, {
+          httpMetadata: { contentType: 'image/jpeg' }
+        })
+      } catch (_) { thumbnailKey = null }
+    }
+
     // D1にメタデータ保存
     const stmt = await c.env.DB.prepare(
-      `INSERT INTO videos (filename, original_name, file_size, mime_type, r2_key, tag, memo)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).bind(r2Key.split('/').pop(), file.name, file.size, file.type || 'video/mp4', r2Key, tag || null, memo || null)
+      `INSERT INTO videos (filename, original_name, file_size, mime_type, r2_key, thumbnail_key, tag, memo)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(r2Key.split('/').pop(), file.name, file.size, file.type || 'video/mp4', r2Key, thumbnailKey, tag || null, memo || null)
       .run()
 
     return c.json({ id: stmt.meta.last_row_id, original_name: file.name, file_size: file.size })
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+// ============================
+// API: サムネイル配信
+// ============================
+app.get('/api/videos/:id/thumbnail', async (c) => {
+  const id = c.req.param('id')
+  try {
+    const video = await c.env.DB.prepare('SELECT thumbnail_key FROM videos WHERE id = ?').bind(id).first() as any
+    if (!video || !video.thumbnail_key) {
+      return c.json({ error: 'サムネイルがありません' }, 404)
+    }
+    const obj = await c.env.VIDEO_BUCKET.get(video.thumbnail_key)
+    if (!obj) return c.json({ error: 'サムネイルファイルが見つかりません' }, 404)
+
+    return new Response(obj.body, {
+      status: 200,
+      headers: {
+        'Content-Type': 'image/jpeg',
+        'Cache-Control': 'public, max-age=31536000',
+      }
+    })
   } catch (e: any) {
     return c.json({ error: e.message }, 500)
   }
