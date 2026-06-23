@@ -4,11 +4,246 @@ import { cors } from 'hono/cors'
 type Bindings = {
   DB: D1Database
   VIDEO_BUCKET: R2Bucket
+  AUTH_USER: string
+  AUTH_PASS: string
+  JWT_SECRET: string
 }
 
 const app = new Hono<{ Bindings: Bindings }>()
 
-app.use('*', cors())
+app.use('/api/*', cors())
+
+// ============================
+// JWT ユーティリティ（Web Crypto API）
+// ============================
+const TOKEN_COOKIE = 'vv_session'
+const TOKEN_EXPIRY = 60 * 60 * 24 * 7 // 7日間
+
+async function signJWT(payload: Record<string, unknown>, secret: string): Promise<string> {
+  const header = btoa(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).replace(/=/g,'').replace(/\+/g,'-').replace(/\//g,'_')
+  const body   = btoa(JSON.stringify(payload)).replace(/=/g,'').replace(/\+/g,'-').replace(/\//g,'_')
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`${header}.${body}`))
+  const sigB64 = btoa(String.fromCharCode(...new Uint8Array(sig))).replace(/=/g,'').replace(/\+/g,'-').replace(/\//g,'_')
+  return `${header}.${body}.${sigB64}`
+}
+
+async function verifyJWT(token: string, secret: string): Promise<Record<string, unknown> | null> {
+  try {
+    const [header, body, sig] = token.split('.')
+    const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify'])
+    const rawSig = Uint8Array.from(atob(sig.replace(/-/g,'+').replace(/_/g,'/')), c => c.charCodeAt(0))
+    const valid = await crypto.subtle.verify('HMAC', key, rawSig, new TextEncoder().encode(`${header}.${body}`))
+    if (!valid) return null
+    const payload = JSON.parse(atob(body.replace(/-/g,'+').replace(/_/g,'/')))
+    if (payload.exp && Date.now() / 1000 > payload.exp) return null
+    return payload
+  } catch { return null }
+}
+
+function getTokenFromRequest(req: Request): string | null {
+  const cookie = req.headers.get('cookie') || ''
+  const match = cookie.match(new RegExp(`${TOKEN_COOKIE}=([^;]+)`))
+  return match ? match[1] : null
+}
+
+// ============================
+// 認証ミドルウェア
+// ============================
+async function authMiddleware(c: any, next: () => Promise<void>) {
+  const path = new URL(c.req.url).pathname
+  // ログインページ・認証APIは除外
+  if (path === '/login' || path === '/api/auth/login' || path === '/api/auth/logout') {
+    return next()
+  }
+  const token = getTokenFromRequest(c.req.raw)
+  const secret = c.env.JWT_SECRET || 'default-secret-change-me'
+  const payload = token ? await verifyJWT(token, secret) : null
+  if (!payload) {
+    // APIは401、ページはログインにリダイレクト
+    if (path.startsWith('/api/')) {
+      return c.json({ error: '認証が必要です' }, 401)
+    }
+    return c.redirect('/login')
+  }
+  return next()
+}
+
+app.use('*', authMiddleware)
+
+// ============================
+// ログインページ
+// ============================
+app.get('/login', (c) => {
+  const err = c.req.query('error')
+  return c.html(`<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>📹 VideoVault - ログイン</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0f0f1a;
+      color: #e2e8f0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .login-card {
+      width: 100%;
+      max-width: 380px;
+      background: #1a1a2e;
+      border: 1px solid #2d2d4e;
+      border-radius: 20px;
+      padding: 36px 28px;
+    }
+    .logo {
+      text-align: center;
+      margin-bottom: 28px;
+    }
+    .logo-title {
+      font-size: 1.6rem;
+      font-weight: 800;
+      background: linear-gradient(135deg, #a78bfa, #f59e0b);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .logo-sub {
+      font-size: 0.8rem;
+      color: #94a3b8;
+      margin-top: 4px;
+    }
+    .form-group { margin-bottom: 16px; }
+    .form-label {
+      display: block;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: #94a3b8;
+      margin-bottom: 6px;
+    }
+    .form-input {
+      width: 100%;
+      padding: 14px 16px;
+      background: #16213e;
+      border: 1px solid #2d2d4e;
+      border-radius: 12px;
+      color: #e2e8f0;
+      font-size: 1rem;
+      outline: none;
+      box-sizing: border-box;
+      transition: border-color 0.2s;
+    }
+    .form-input:focus { border-color: #7c3aed; }
+    .btn-login {
+      width: 100%;
+      padding: 14px;
+      background: linear-gradient(135deg, #7c3aed, #6d28d9);
+      color: white;
+      border: none;
+      border-radius: 12px;
+      font-size: 1rem;
+      font-weight: 700;
+      cursor: pointer;
+      margin-top: 8px;
+      transition: opacity 0.2s;
+      box-shadow: 0 4px 20px rgba(124,58,237,0.4);
+    }
+    .btn-login:active { opacity: 0.85; }
+    .error-box {
+      background: rgba(239,68,68,0.1);
+      border: 1px solid rgba(239,68,68,0.4);
+      border-radius: 10px;
+      padding: 12px 14px;
+      font-size: 0.85rem;
+      color: #fca5a5;
+      margin-bottom: 16px;
+      text-align: center;
+    }
+    .lock-icon {
+      font-size: 3rem;
+      display: block;
+      text-align: center;
+      margin-bottom: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="login-card">
+    <div class="logo">
+      <span class="lock-icon">🔐</span>
+      <div class="logo-title">VideoVault</div>
+      <div class="logo-sub">動画ストレージマネージャー</div>
+    </div>
+    ${err ? `<div class="error-box">❌ IDまたはパスワードが正しくありません</div>` : ''}
+    <form method="POST" action="/api/auth/login">
+      <div class="form-group">
+        <label class="form-label">ユーザーID</label>
+        <input type="text" name="username" class="form-input" placeholder="IDを入力" required autocomplete="username">
+      </div>
+      <div class="form-group">
+        <label class="form-label">パスワード</label>
+        <input type="password" name="password" class="form-input" placeholder="パスワードを入力" required autocomplete="current-password">
+      </div>
+      <button type="submit" class="btn-login">ログイン</button>
+    </form>
+  </div>
+</body>
+</html>`)
+})
+
+// ============================
+// API: ログイン認証
+// ============================
+app.post('/api/auth/login', async (c) => {
+  try {
+    const body = await c.req.parseBody()
+    const username = (body['username'] as string || '').trim()
+    const password = (body['password'] as string || '').trim()
+
+    const correctUser = c.env.AUTH_USER || 'admin'
+    const correctPass = c.env.AUTH_PASS || 'password'
+
+    if (username !== correctUser || password !== correctPass) {
+      return c.redirect('/login?error=1')
+    }
+
+    const secret = c.env.JWT_SECRET || 'default-secret-change-me'
+    const token = await signJWT({
+      sub: username,
+      exp: Math.floor(Date.now() / 1000) + TOKEN_EXPIRY,
+      iat: Math.floor(Date.now() / 1000),
+    }, secret)
+
+    const isProd = !c.req.url.includes('localhost')
+    return new Response(null, {
+      status: 302,
+      headers: {
+        'Location': '/',
+        'Set-Cookie': `${TOKEN_COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${TOKEN_EXPIRY}${isProd ? '; Secure' : ''}`,
+      }
+    })
+  } catch (e: any) {
+    return c.redirect('/login?error=1')
+  }
+})
+
+// ============================
+// API: ログアウト
+// ============================
+app.post('/api/auth/logout', (c) => {
+  return new Response(null, {
+    status: 302,
+    headers: {
+      'Location': '/login',
+      'Set-Cookie': `${TOKEN_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`,
+    }
+  })
+})
 
 // ============================
 // HTML ページ (スマホファースト)
@@ -483,9 +718,16 @@ app.get('/', (c) => {
       <div class="header-title">📹 VideoVault</div>
       <div style="font-size:0.7rem; color:var(--text-muted); margin-top:2px;">動画ストレージマネージャー</div>
     </div>
-    <button onclick="openUpload()" style="background:var(--primary); border:none; color:white; width:40px; height:40px; border-radius:50%; cursor:pointer; font-size:1.2rem; display:flex; align-items:center; justify-content:center;">
-      <i class="fas fa-plus"></i>
-    </button>
+    <div style="display:flex; gap:8px; align-items:center;">
+      <form method="POST" action="/api/auth/logout" style="margin:0;">
+        <button type="submit" style="background:rgba(255,255,255,0.08); border:1px solid var(--border); color:var(--text-muted); width:36px; height:36px; border-radius:50%; cursor:pointer; font-size:0.85rem; display:flex; align-items:center; justify-content:center;" title="ログアウト">
+          <i class="fas fa-sign-out-alt"></i>
+        </button>
+      </form>
+      <button onclick="openUpload()" style="background:var(--primary); border:none; color:white; width:40px; height:40px; border-radius:50%; cursor:pointer; font-size:1.2rem; display:flex; align-items:center; justify-content:center;">
+        <i class="fas fa-plus"></i>
+      </button>
+    </div>
   </div>
 </header>
 
