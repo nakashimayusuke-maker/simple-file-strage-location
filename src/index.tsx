@@ -1072,18 +1072,16 @@ async function deleteAllVideos() {
 // =====================
 // ダウンロード
 // =====================
-async function downloadCurrent() {
+function downloadCurrent() {
   if (!currentVideo) return;
-  try {
-    const res = await fetch(\`/api/videos/\${currentVideo.id}/url\`);
-    const data = await res.json();
-    const a = document.createElement('a');
-    a.href = data.url;
-    a.download = currentVideo.original_name;
-    a.click();
-  } catch (e) {
-    showToast('ダウンロードに失敗しました', 'error');
-  }
+  // ダウンロード専用エンドポイントに直接遷移（Content-Disposition: attachment）
+  const a = document.createElement('a');
+  a.href = \`/api/videos/\${currentVideo.id}/download\`;
+  a.download = currentVideo.original_name;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  showToast('ダウンロードを開始しました！', 'success');
 }
 
 // =====================
@@ -1391,6 +1389,31 @@ app.get('/api/videos/:id/stream', async (c) => {
     }
 
     headers['Content-Length'] = String(video.file_size)
+    return new Response(obj.body, { status: 200, headers })
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+// ============================
+// API: 動画ダウンロード（強制DL）
+// ============================
+app.get('/api/videos/:id/download', async (c) => {
+  const id = c.req.param('id')
+  try {
+    const video = await c.env.DB.prepare('SELECT * FROM videos WHERE id = ?').bind(id).first() as any
+    if (!video) return c.json({ error: '動画が見つかりません' }, 404)
+
+    const obj = await c.env.VIDEO_BUCKET.get(video.r2_key)
+    if (!obj) return c.json({ error: 'ファイルが見つかりません' }, 404)
+
+    // Content-Disposition: attachment でブラウザに強制ダウンロードさせる
+    const filename = encodeURIComponent(video.original_name)
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/octet-stream',
+      'Content-Disposition': `attachment; filename*=UTF-8''${filename}; filename="${filename}"`,
+      'Content-Length': String(video.file_size),
+    }
     return new Response(obj.body, { status: 200, headers })
   } catch (e: any) {
     return c.json({ error: e.message }, 500)
