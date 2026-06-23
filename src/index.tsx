@@ -913,6 +913,13 @@ app.get('/', (c) => {
       <p style="font-size:0.8rem; color:var(--text-muted); margin-top:4px;">動画ファイルをクラウドに安全に保管・管理できるサービスです。</p>
     </div>
     <div style="padding:16px; border-bottom:1px solid var(--border);">
+      <p style="font-weight:700; font-size:0.9rem;">🎞️ サムネイル一括生成</p>
+      <p style="font-size:0.8rem; color:var(--text-muted); margin-top:4px; margin-bottom:10px;">サムネイルがない動画のサムネイルをまとめて生成します。動画本数によっては時間がかかります。</p>
+      <button class="btn btn-primary" onclick="regenerateAllThumbnails()" style="font-size:0.85rem; padding:10px 16px;">
+        <i class="fas fa-images"></i> サムネイル一括生成
+      </button>
+    </div>
+    <div style="padding:16px; border-bottom:1px solid var(--border);">
       <p style="font-weight:700; font-size:0.9rem;">キャッシュクリア</p>
       <p style="font-size:0.8rem; color:var(--text-muted); margin-top:4px; margin-bottom:10px;">動画リストのキャッシュをクリアして再取得します。</p>
       <button class="btn btn-ghost" onclick="refreshAll()" style="font-size:0.85rem; padding:10px 16px;">
@@ -1016,15 +1023,15 @@ function renderVideos(videos) {
     const tag = allTags.find(t => t.name === v.tag);
     const tagColor = tag ? tag.color : '#6366f1';
     const thumbHtml = v.thumbnail_key
-      ? \`<img src="/api/videos/\${v.id}/thumbnail" alt="thumbnail"
+      ? \`<img data-thumb-id="\${v.id}" src="/api/videos/\${v.id}/thumbnail" alt="thumbnail"
              style="width:100%; height:100%; object-fit:cover; position:absolute; inset:0;"
              onerror="this.style.display='none'">\`
-      : '';
+      : \`<img data-thumb-id="\${v.id}" style="display:none; width:100%; height:100%; object-fit:cover; position:absolute; inset:0;">\`;
     return \`
       <div class="video-card" onclick="openPlayer(\${v.id})">
         <div class="video-thumb">
           \${thumbHtml}
-          <i class="fas fa-video video-thumb-icon" style="position:absolute; \${v.thumbnail_key ? 'display:none;' : ''}"></i>
+          <i data-icon-id="\${v.id}" class="fas fa-video video-thumb-icon" style="position:absolute; \${v.thumbnail_key ? 'display:none;' : ''}"></i>
           <div class="play-overlay">
             <i class="fas fa-play-circle"></i>
           </div>
@@ -1192,6 +1199,79 @@ async function submitUpload() {
 // =====================
 // サムネイル生成（Canvas）
 // =====================
+// =====================
+// 既存動画のサムネイル再生成
+// =====================
+async function regenerateThumbnail(videoId) {
+  showToast('サムネイルを生成中...', 'success');
+  try {
+    // ストリームURLから動画を読み込んでCanvas描画
+    const streamUrl = \`/api/videos/\${videoId}/stream\`;
+    const jpeg = await generateThumbnailFromUrl(streamUrl);
+    if (!jpeg) { showToast('サムネイル生成に失敗しました', 'error'); return; }
+
+    const res = await fetch(\`/api/videos/\${videoId}/thumbnail\`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ thumbnail: jpeg })
+    });
+    if (res.ok) {
+      // キャッシュバスター付きで再表示
+      const img = document.querySelector(\`[data-thumb-id="\${videoId}"]\`);
+      if (img) { img.src = \`/api/videos/\${videoId}/thumbnail?t=\${Date.now()}\`; img.style.display = ''; }
+      const icon = document.querySelector(\`[data-icon-id="\${videoId}"]\`);
+      if (icon) icon.style.display = 'none';
+      // allVideos も更新
+      const v = allVideos.find(v => v.id === videoId);
+      if (v) v.thumbnail_key = 'generated';
+      showToast('サムネイルを生成しました！', 'success');
+    } else {
+      showToast('サムネイルの保存に失敗しました', 'error');
+    }
+  } catch(e) {
+    showToast('サムネイル生成エラー: ' + e.message, 'error');
+  }
+}
+
+async function regenerateAllThumbnails() {
+  const noThumb = allVideos.filter(v => !v.thumbnail_key);
+  if (noThumb.length === 0) { showToast('全動画にサムネイルがあります', 'success'); return; }
+  showToast(\`\${noThumb.length}件のサムネイルを生成します...\`, 'success');
+  for (const v of noThumb) {
+    await regenerateThumbnail(v.id);
+    await new Promise(r => setTimeout(r, 300));
+  }
+  showToast('全サムネイル生成完了！', 'success');
+}
+
+// URLから動画を読み込んでサムネイルを生成（既存動画用）
+function generateThumbnailFromUrl(url) {
+  return new Promise((resolve) => {
+    const video = document.createElement('video');
+    video.preload = 'metadata';
+    video.muted = true;
+    video.playsInline = true;
+    const timer = setTimeout(() => resolve(null), 15000);
+    video.onloadedmetadata = () => {
+      const seekTime = video.duration > 0 ? Math.min(video.duration * 0.05, 3) : 1;
+      video.currentTime = seekTime;
+    };
+    video.onseeked = () => {
+      clearTimeout(timer);
+      try {
+        const canvas = document.createElement('canvas');
+        const W = 640;
+        const H = Math.round(W * (video.videoHeight / video.videoWidth)) || 360;
+        canvas.width = W; canvas.height = H;
+        canvas.getContext('2d').drawImage(video, 0, 0, W, H);
+        resolve(canvas.toDataURL('image/jpeg', 0.75));
+      } catch(e) { resolve(null); }
+    };
+    video.onerror = () => { clearTimeout(timer); resolve(null); };
+    video.src = url;
+  });
+}
+
 function generateThumbnail(file) {
   return new Promise((resolve) => {
     const url = URL.createObjectURL(file);
@@ -1199,17 +1279,18 @@ function generateThumbnail(file) {
     video.preload = 'metadata';
     video.muted = true;
     video.playsInline = true;
-    video.crossOrigin = 'anonymous';
+    // crossOrigin を削除（スマホのローカルファイルで問題が出るため）
 
     const cleanup = () => { URL.revokeObjectURL(url); };
+    const timer = setTimeout(() => { cleanup(); resolve(null); }, 10000);
 
-    video.onloadeddata = () => {
-      // 動画の長さが取れればその5%地点、無ければ1秒
+    video.onloadedmetadata = () => {
       const seekTime = video.duration > 0 ? Math.min(video.duration * 0.05, 3) : 1;
       video.currentTime = seekTime;
     };
 
     video.onseeked = () => {
+      clearTimeout(timer);
       try {
         const canvas = document.createElement('canvas');
         const W = 640;
@@ -1220,6 +1301,7 @@ function generateThumbnail(file) {
         ctx.drawImage(video, 0, 0, W, H);
         const jpeg = canvas.toDataURL('image/jpeg', 0.75);
         cleanup();
+        clearTimeout(timer);
         resolve(jpeg);
       } catch (e) {
         cleanup();
@@ -1675,6 +1757,48 @@ app.get('/api/videos/:id/thumbnail', async (c) => {
         'Cache-Control': 'public, max-age=31536000',
       }
     })
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500)
+  }
+})
+
+// ============================
+// API: サムネイル保存（POST）
+// ============================
+app.post('/api/videos/:id/thumbnail', async (c) => {
+  const id = c.req.param('id')
+  try {
+    const video = await c.env.DB.prepare('SELECT id, r2_key FROM videos WHERE id = ?').bind(id).first() as any
+    if (!video) return c.json({ error: '動画が見つかりません' }, 404)
+
+    const body = await c.req.json() as any
+    const dataUrl: string = body.thumbnail || ''
+    if (!dataUrl.startsWith('data:image/jpeg')) {
+      return c.json({ error: '不正なサムネイルデータ' }, 400)
+    }
+
+    // Base64 → ArrayBuffer に変換
+    const base64 = dataUrl.replace(/^data:image\/jpeg;base64,/, '')
+    const binaryStr = atob(base64)
+    const bytes = new Uint8Array(binaryStr.length)
+    for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i)
+
+    // R2 に保存
+    const thumbKey = `thumbnails/${id}_${Date.now()}.jpg`
+    await c.env.VIDEO_BUCKET.put(thumbKey, bytes.buffer, {
+      httpMetadata: { contentType: 'image/jpeg' }
+    })
+
+    // 古いサムネイルがあれば削除
+    const old = await c.env.DB.prepare('SELECT thumbnail_key FROM videos WHERE id = ?').bind(id).first() as any
+    if (old?.thumbnail_key) {
+      await c.env.VIDEO_BUCKET.delete(old.thumbnail_key).catch(() => {})
+    }
+
+    // D1 更新
+    await c.env.DB.prepare('UPDATE videos SET thumbnail_key = ? WHERE id = ?').bind(thumbKey, id).run()
+
+    return c.json({ success: true, thumbnail_key: thumbKey })
   } catch (e: any) {
     return c.json({ error: e.message }, 500)
   }
