@@ -742,12 +742,12 @@ async function loadTags() {
 // =====================
 function updateStorageInfo() {
   const total = allVideos.reduce((sum, v) => sum + (v.file_size || 0), 0);
-  // 仮上限 5GB
-  const limit = 5 * 1024 * 1024 * 1024;
+  // 上限 100GB
+  const limit = 100 * 1024 * 1024 * 1024;
   const pct = Math.min((total / limit) * 100, 100).toFixed(1);
   document.getElementById('storageFill').style.width = pct + '%';
   document.getElementById('storageUsed').textContent = formatSize(total);
-  document.getElementById('storagePercent').textContent = pct + '% / 5GB';
+  document.getElementById('storagePercent').textContent = pct + '% / 100GB';
   document.getElementById('videoCount').textContent = allVideos.length + ' 本の動画';
 }
 
