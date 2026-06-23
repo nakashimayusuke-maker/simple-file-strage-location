@@ -5,6 +5,10 @@
 - **目的**: スマホで撮影した動画をクラウドにアップロード・管理するWebアプリ
 - **特徴**: スマホファーストUI、タグ管理、検索、ストリーミング再生
 
+## 🌐 URL
+- **本番**: https://53b9a32f-fed0-42da-8438-40940f926cdb.vip.gensparksite.com
+- **GitHub**: https://github.com/nakashimayusuke-maker/simple-file-strage-location
+
 ## 機能
 - ✅ 動画アップロード（複数同時・ドラッグ&ドロップ）
 - ✅ 動画一覧表示（グリッドレイアウト）
@@ -34,13 +38,13 @@
 | `DELETE /api/tags/:id` | タグ削除 |
 
 ## データ設計
-- **DB**: Cloudflare D1 (SQLite)  
+- **DB**: Cloudflare D1 (SQLite) — `53b9a32f-fed0-42da-8438-40940f926cdb-db`
   - `videos`: id, filename, original_name, file_size, mime_type, r2_key, tag, memo, created_at
   - `tags`: id, name, color, created_at
-- **Storage**: Cloudflare R2 (`VIDEO_BUCKET`)
+- **Storage**: Cloudflare R2 — `53b9a32f-fed0-42da-8438-40940f926cdb-r2`
 
 ## デプロイ
-- **プラットフォーム**: Cloudflare Pages + Workers
-- **ステータス**: ローカル開発中
+- **プラットフォーム**: Cloudflare Workers (Genspark managed)
+- **ステータス**: ✅ 本番稼働中
 - **技術スタック**: Hono + TypeScript + TailwindCSS CDN
 - **最終更新**: 2026-06-23
